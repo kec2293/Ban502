@@ -1,0 +1,89 @@
+---
+title: "M2A1"
+author: "KaraCheers"
+date: "2025-01-23"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(GGally)
+library(lmtest)
+```
+
+```{r}
+air = airquality
+```
+
+```{r}
+str(air)
+summary(air)
+```
+```{r}
+air2 = air %>% drop_na()
+```
+```{r}
+str(air2)
+summary(air2)
+```
+```{r}
+ggpairs(air2)
+```
+```{r}
+ggcorr(air2, label = TRUE)
+```
+```{r}
+ggplot(air2, aes(x=Temp,y=Ozone)) + geom_point(alpha=0.1)
+```
+```{r}
+lm_fit = lm(Ozone ~ Temp, air2) 
+summary(lm_fit)
+```
+```{r}
+Ozone_Temp = recipe(Ozone ~ Temp, air2)
+Ozone_Temp
+```
+```{r}
+lm_model = 
+  linear_reg() %>% 
+  set_engine("lm") 
+```
+```{r}
+lm_wflow = 
+  workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(Ozone_Temp)
+```
+```{r}
+lm_fit = fit(lm_wflow, air2)
+```
+```{r}
+summary(lm_fit$fit$fit$fit) 
+```
+```{r}
+confint(lm_fit$fit$fit$fit)
+```
+```{r}
+testdata = data.frame(Temp = c(80))
+predict(lm_fit, new_data = testdata)
+```
+```{r}
+dwtest(lm_fit$fit$fit$fit)
+```
+```{r}
+air2 = air2 %>% mutate(resid1 = lm_fit$fit$fit$fit$residuals) 
+ggplot(air2,aes(x=Ozone,y=Temp)) + geom_point() + theme_bw()
+```
+```{r}
+ggplot(air2, aes(x=Ozone,y=Temp)) + geom_point() + 
+  geom_smooth(method="lm",se=FALSE, color="red") + theme_bw()
+```
+```{r}
+ggplot(air2,aes(x=resid1)) + geom_histogram() + theme_bw()
+```
+

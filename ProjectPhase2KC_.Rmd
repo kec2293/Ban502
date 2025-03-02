@@ -1,0 +1,312 @@
+---
+title: "Ames Project Phase 2"
+author: "KaraCheers"
+date: "2025-03-01"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(naniar) 
+library(skimr) 
+library(UpSetR) 
+library(GGally) 
+library(ggcorrplot) 
+library(gridExtra)
+library(xgboost)
+library(caret)
+library(ROCR) 
+```
+
+```{r}
+file_path = "C:/Users/kec22/Downloads/ames_student-1 (1).csv"
+ames_data = read.csv(file_path)
+```
+```{r}
+ames_data = ames_data %>%
+  mutate(
+    Above_Median = as_factor(Above_Median) %>% fct_recode("No" = "No", "Yes" = "Yes")
+  ) %>%
+  mutate_if(is.character, as_factor)  
+
+str(ames_data)
+summary(ames_data)
+```
+```{r}
+ames_simple = ames_data %>% dplyr::select("Alley", "Lot_Shape", "Utilities", "Condition_1", "Bldg_Type", "House_Style", "Roof_Style", "Exter_Qual", "Foundation", "Functional", "Fireplace_Qu", "Overall_Qual", "Garage_Area", "Total_Bsmt_SF", "Year_Built", "Year_Remod_Add", "Neighborhood", "TotRms_AbvGrd", "Lot_Area", "Above_Median")
+```
+```{r}
+gg_miss_var(ames_simple)
+```
+```{r}
+
+set.seed(123)
+data_split = initial_split(ames_simple, prop = 0.80, strata = Above_Median)
+xtrain = training(data_split)
+xtest = testing(data_split)
+```
+
+```{r}
+#LASSO Regression
+ames_recipe = 
+  recipe(Above_Median ~ ., data = xtrain) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%  
+  step_zv(all_predictors()) %>%   
+  step_normalize(all_numeric_predictors())  
+
+ames_spec =
+  logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet") 
+
+ames_workflow = 
+  workflow() %>% 
+  add_recipe(ames_recipe) %>% 
+  add_model(ames_spec) 
+
+ames_grid = grid_regular(penalty(), levels = 100)
+
+```
+```{r}
+set.seed(123)
+folds = vfold_cv(xtrain, v = 5, strata = Above_Median)
+control = control_grid(save_pred = TRUE)  
+ames_tune =
+  tune_grid(ames_workflow, resamples = folds, 
+            grid = ames_grid, metrics = metric_set(mn_log_loss),
+            control=control)
+```
+```{r}
+best_mnlog = ames_tune %>%
+  select_best(metric = "mn_log_loss")
+```
+```{r}
+ames_tune %>%
+  collect_metrics() %>%
+  ggplot(aes(penalty, mean)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(linewidth = 1.5) +
+  theme(legend.position = "none")
+
+```
+
+```{r}
+final_lasso = ames_workflow %>% finalize_workflow(best_mnlog)
+```
+```{r}
+best_lasso = select_best(ames_tune, metric = "mn_log_loss")
+print(best_mnlog)
+final_lasso_wflow = finalize_workflow(ames_workflow, best_lasso)
+```
+```{r}
+final_lasso_fit = fit(final_lasso_wflow, data = xtrain)  
+```
+```{r}
+options(scipen = 999)
+final_lasso_fit %>% 
+  extract_fit_parsnip() %>% 
+  pluck("fit") %>% 
+  coef(s = best_mnlog$penalty)
+options(scipen = 0)
+```
+```{r}
+trainpred_lasso = predict(final_lasso_fit, xtrain, type = "class")
+confusionMatrix(trainpred_lasso$.pred_class, xtrain$Above_Median, positive = "Yes")
+```
+```{r}
+testpred_lasso = predict(final_lasso_fit, xtest, type = "class")
+confusionMatrix(testpred_lasso$.pred_class, xtest$Above_Median, positive = "Yes")
+```
+```{r}
+lasso_coefs = tidy(final_lasso_fit)  
+lasso_importance = lasso_coefs %>%
+  filter(estimate != 0) %>%  
+  mutate(abs_estimate = abs(estimate)) %>%  
+  arrange(desc(abs_estimate)) %>%  
+  head(10)  
+
+ggplot(lasso_importance, aes(x = reorder(term, abs_estimate), y = abs_estimate)) +
+  geom_bar(stat = "identity", fill = "lightgreen", color = "black") +  
+  coord_flip() +  
+  labs(
+    title = "Top 10 Most Important Variables - LASSO Regression",
+    x = "Feature",
+    y = "Importance"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+  axis.title = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 08, face = "bold")
+  )
+
+```
+
+ 
+```{r}
+predictions = predict(final_lasso_fit, xtest, type="prob")[2]
+
+ROCRpred = prediction(predictions, xtest$Above_Median) 
+
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, colorize=TRUE, print.cutoffs.at=seq(0,1,by=0.1), text.adj=c(-0.2,1.7))
+```
+```{r}
+set.seed(123)
+data_split = initial_split(ames_simple, prop = 0.80, strata = Above_Median)
+xtrain = training(data_split)
+xtest = testing(data_split)
+```
+```{r}
+#Random Forest
+amesrf_recipe = recipe(Above_Median ~ ., data = xtrain) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest() %>% 
+  set_engine("ranger", importance = "impurity") %>%  
+  set_mode("classification")
+
+amesrf_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(amesrf_recipe)
+
+set.seed(123)
+final_rf_fit = fit(amesrf_wflow, data = xtrain)
+```
+
+```{r}
+final_rf_fit
+```
+```{r}
+final_rf_fit = fit(amesrf_wflow, data = xtrain)
+```
+```{r}
+trainpred_rf = predict(final_rf_fit, xtrain, type = "class")
+confusionMatrix(trainpred_rf$.pred_class, xtrain$Above_Median, positive = "Yes")
+```
+
+```{r}
+testpred_rf = predict(final_rf_fit, xtest, type = "class")
+confusionMatrix(testpred_rf$.pred_class, xtest$Above_Median, positive = "Yes")
+
+```
+
+```{r}
+ rf_model = extract_fit_parsnip(final_rf_fit)
+
+rf_importance = ranger::importance(rf_model$fit)
+
+rf_importance_df = as.data.frame(rf_importance) %>%
+  rownames_to_column(var = "Feature") %>%  
+  rename(Importance = rf_importance) %>%
+  arrange(desc(Importance)) %>%  
+  head(10)  
+
+ggplot(rf_importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightgreen", color = "black") +  
+  coord_flip() + 
+  labs(
+    title = "Top 10 Most Important Variables - Random Forest",
+    x = "Feature",
+    y = "Importance Score"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    axis.title = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 08, face = "bold")
+  )
+
+```
+```{r}
+
+#use_xgboost(Above_Median ~., xtrain)
+```
+```{r}
+
+#XGBoost
+
+start_time = Sys.time()
+
+xgboost_recipe = 
+  recipe(formula = Above_Median ~ ., data = xtrain) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%  
+  step_zv(all_predictors()) 
+
+xgboost_spec =
+  boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), 
+    loss_reduction = tune(), sample_size = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost") 
+
+xgboost_workflow =
+  workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
+
+set.seed(46419)
+xgboost_tune =
+  tune_grid(xgboost_workflow, resamples = folds, grid = 25)
+
+end_time = Sys.time()
+end_time - start_time
+
+```
+```{r}
+best_xgb = select_best(xgboost_tune, metric= "accuracy")
+
+final_xgb_wflow = finalize_workflow(xgboost_workflow, best_xgb)
+
+final_xgb_fit = fit(final_xgb_wflow, xtrain)
+
+```
+
+```{r}
+trainpredxgb = predict(final_xgb_fit, xtrain, type = "class")
+head(trainpredxgb)
+```
+```{r}
+confusionMatrix(trainpredxgb$.pred_class, xtrain$Above_Median, 
+                positive = "Yes")
+```
+
+```{r}
+testpredxgb = predict(final_xgb_fit, xtest, type = "class")
+head(testpredxgb)
+```
+```{r}
+confusionMatrix(testpredxgb$.pred_class, xtest$Above_Median, 
+                positive = "Yes")
+```
+```{r}
+xgb_model = extract_fit_engine(final_xgb_fit)
+xgb_importance = xgb.importance(model = xgb_model)
+xgb_importance_top10 = xgb_importance[1:10, ]  
+ggplot(xgb_importance_top10, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity", fill = "lightgreen", color = "black") +  
+  coord_flip() +  
+  labs(
+    title = "Top 10 Most Important Variables - XGBoost",
+    x = "Feature",
+    y = "Importance (Gain)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    axis.title = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 06, face = "bold")
+  )
+```
+```{r}
+show_best(xgboost_tune, metric = "roc_auc")
+```
